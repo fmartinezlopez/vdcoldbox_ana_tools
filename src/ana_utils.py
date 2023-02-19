@@ -9,8 +9,11 @@ import matplotlib.colors
 
 #TODO: fix binning for 1D and 2D histograms
 
+#HARDCODED!!!
+#Boundaries of the different CRP planes in offline channel numbers
 plane_index = [0, 952, 1904, 3072]
 
+#Dictionary of basic binary operations to parse math expressions with DF columns
 operators = {
     '+' : operator.add,
     '-' : operator.sub,
@@ -21,11 +24,37 @@ operators = {
 }
 
 def open_adc(filename):
-    return pd.read_hdf(filename, key="raw_adcs")
+    '''
+    Reads the given file and extracts the corresponding ADC pandas DataFrame.
+
+            Args:
+                    filename  (str):                 Path to HDF5 file with (from dtpfeedbacktools/dtp-feedback-proxy.py).
+            
+            Returns:
+                    adc_df    (pandas.DataFrame):    ADC DataFrame.
+
+    '''
+
+    adc_df = pd.read_hdf(filename, key="raw_adcs")
+    return adc_df
 
 def open_tps(filename):
-    return pd.read_hdf(filename, key="tps")
+    '''
+    Reads the given file and extracts the corresponding TP pandas DataFrame.
 
+            Args:
+                    filename  (str):                 TP DataFrame to use.
+            
+            Returns:
+                    tp_df     (pandas.DataFrame):    TP DataFrame.
+
+    '''
+
+    tp_df = pd.read_hdf(filename, key="tps")
+    return tp_df
+
+#This implementation of the rms computation takes a lot of time
+#TODO: write a better one!
 def rms(values):
     return np.sqrt(sum(values**2)/len(values))
 
@@ -34,15 +63,17 @@ def parse_df_math(df, string):
     Returns the result of a basic binary operation on any two columns of the TP pandas DataFrame.
 
             Args:
-                    df     (pandas.DataFrame):   TP DataFrame to use.
-                    string (str):                Binary operation between two keys of df without white spaces (e.g. "peak_time-start_time").
+                    df              (pandas.DataFrame):         TP DataFrame to use.
+                    string          (str):                      Binary operation between two keys of df without white spaces (e.g. "peak_time-start_time").
             
             Returns:
-
+                    result          (pandas.Series):            Result of the operation on the two columns.
 
     '''
+
     split_string = re.split('(\W+)', string)
-    return operators[split_string[1]](df[split_string[0]], df[split_string[2]])
+    result = operators[split_string[1]](df[split_string[0]], df[split_string[2]])
+    return result
 
 def plot_hist_by_plane(df, var, nbins=None, bins=None, color="dodgerblue", xscale="linear", yscale="linear", grid=True, save=False, outfile=None):
     '''
@@ -64,7 +95,7 @@ def plot_hist_by_plane(df, var, nbins=None, bins=None, color="dodgerblue", xscal
 
     fig = plt.figure(figsize=(16,4))
     gs = fig.add_gridspec(1, 3, hspace=0.05)
-    axs = gs.subplots(sharex=True)
+    axs = gs.subplots()
 
     axs[0].set_ylabel("Count")
 
@@ -125,7 +156,7 @@ def plot_2dhist_by_plane(df, varx, vary, nxbins=None, nybins=None, xbins=None, y
     if vary == "offline_ch":
         fig = plt.figure(figsize=(10,8))
         gs = fig.add_gridspec(3, 1, wspace=0.05)
-        axs = gs.subplots(sharex=True)
+        axs = gs.subplots()
         axs[-1].set_xlabel(varx)
         for i in range(3):
             axs[i].set_ylabel(vary)
