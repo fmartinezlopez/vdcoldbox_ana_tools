@@ -1,3 +1,10 @@
+"""
+Created on: 01/03/2023 11:55
+
+Author: Shyam Bhuller
+
+Description: Analyses exported TRs.
+"""
 import argparse
 import os
 
