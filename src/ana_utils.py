@@ -9,7 +9,7 @@ import matplotlib.colors
 
 #TODO: fix binning for 1D and 2D histograms
 
-#HARDCODED!!!
+#!HARDCODED!!!
 #Boundaries of the different CRP planes in offline channel numbers
 plane_index = [0, 952, 1904, 3072]
 

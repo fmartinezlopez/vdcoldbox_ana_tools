@@ -13,12 +13,30 @@ from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+import matplotlib.patches as patches
 import seaborn as sns
 
 from matplotlib.colors import LogNorm
 from rich import print
 
 import detchannelmaps
+
+@dataclass
+class Region():
+    start_time    : int
+    end_time      : int
+    start_channel : int
+    end_channel   : int
+    n_TP          : int
+
+    @property
+    def time_range(self):
+        return self.end_time - self.start_time
+    
+    @property
+    def channel_range(self):
+        return self.end_channel - self.start_channel
 
 
 class Record:
@@ -39,13 +57,18 @@ class Record:
         return self.tps[self.tps.start_time.isin(self.info.trigger_timestamp)]
 
 
-    def EventDisplay(self, path : str = ""):
+    def EventDisplay(self, path : str = "", find_regions : bool = False, plot_triggered_tp : bool = False):
         fig, axes = plt.subplots(nrows = 3, ncols = 1, figsize=(6.4*2, 4.8*2), sharex = True)
         self.AddPlaneID(args.channel_map) # so we can filter by plane ID when making plots #? perhaps this should be done at __init__ or something
 
-        triggered_tp = self.FindTriggeredTPs()
+        if plot_triggered_tp:
+            triggered_tp = self.FindTriggeredTPs()
+        else:
+            triggered_tp = pd.DataFrame()
 
-        y_labels = ["U", "V", "X"]
+        y_labels = ["U", "V", "Y"]
+        xlim = None
+        ylim = None
         for i in range(3):
             adc_df = self.raw_adcs.iloc[:, self.raw_adcs.columns.get_level_values("planeID") == i]
             adc_df.columns = adc_df.columns.get_level_values("offline_channel").values
@@ -59,19 +82,82 @@ class Record:
 
 
             tp_df = self.tps[self.tps.planeID == i]
+
+            if not triggered_tp.empty:
+                triggered_tps_in_plane = triggered_tp[triggered_tp.planeID == i]
+                tp_df = tp_df.drop(list(triggered_tps_in_plane.index))
+
             x, y = ChannelTimeToPlotSpace(tp_df.peak_time, tp_df.offline_ch, adc_df, start_time) # convert channel and time to heat map coordinates
-            axes[-(i + 1)].scatter(x, y, color = "dodgerblue", s = 5, label = "TP")
-            
-            triggered_tps_in_plane = triggered_tp[triggered_tp.planeID == i]
-            x, y = ChannelTimeToPlotSpace(triggered_tps_in_plane.peak_time, triggered_tps_in_plane.offline_ch, adc_df, start_time)
-            axes[-(i + 1)].scatter(x, y, color = "lime", s = 40, marker = "x", label = "triggered TP")
+            axes[-(i + 1)].scatter(x, y, color = "dodgerblue", s = 25, label = "TP")
+
+            if not triggered_tp.empty:
+                if not triggered_tps_in_plane.empty:
+                    x, y = ChannelTimeToPlotSpace(triggered_tps_in_plane.peak_time, triggered_tps_in_plane.offline_ch, adc_df, start_time)
+                    axes[-(i + 1)].scatter(x, y, color = "lime", s = 150, marker = "x", label = "triggered TP")
+                    xlim = [x.iloc[0] - 100, x.iloc[0] + 100]
+                    ylim = [y[0] + 50, y[0] - 50]
+
+
+            if find_regions:
+                regions = RegionFinder(tp_df)
+                for r in regions:
+                    x, y = ChannelTimeToPlotSpace([r.start_time, r.end_time], [r.start_channel, r.end_channel], adc_df, start_time)
+                    rect = patches.Rectangle((x[0], y[0]), x[1] - x[0], y[1] - y[0], linewidth = 1, edgecolor = 'r', facecolor = "none")
+                    axes[-(i + 1)].add_patch(rect)
 
             axes[-(i + 1)].set_xlabel("")
             axes[-(i + 1)].set_ylabel(y_labels[i])
-        axes[2].set_xlabel(f"relative timestamp")
+
+        # trigger 1 run 19562
+        # ranges = (
+        #     [(850, 1050), (150, 0)], # Y
+        #     [(850, 1050), (275, 175)], # V
+        #     [(850, 1050), (192, 70)], # U
+        # )
+
+        # trigger 121 run 20676
+        # ranges = (
+        #     [(850, 1050), (170, 20)], # Y
+        #     [(850, 1050), (100, 0)], # V
+        #     [(850, 1050), (100, 0)], # U
+        # )
+
+        # trigger 123 run 20676
+        ranges = (
+            [(900, 1250), (150, 0)], # Y
+            [(900, 1250), (110, 30)], # V
+            [(900, 1250), (150, 50)], # U
+        )
+
+        for ax, r in zip(axes, ranges):
+            ax.set_xlim(r[0])
+            ax.set_ylim(r[1])
+
+        # axes[2].set_xlabel(f"relative timestamp (ticks)")
+        labels = axes[2].get_xticklabels()        
+        print(labels)
+        for label in labels:
+            label._text = str(int(label._text) * 16/1000)
+        print(labels)
+        axes[2].set_xticklabels(labels, rotation = 0)
+        axes[2].set_xlabel(f"relative time ($\mu$s)")
+
         fig.suptitle(f"run: {self.info.run_number.values[0]}, start timestamp : {start_time}")
-        handles, labels = axes[0].get_legend_handles_labels()
-        fig.legend(handles, labels, bbox_to_anchor=(0.525, 0), ncol = 2)
+
+        handles = []
+        labels = []
+        for ax in axes:
+            h, l = ax.get_legend_handles_labels()
+            for i, j in zip(h, l):
+                if j not in labels:
+                    handles.append(i)
+                    labels.append(j)
+
+        if triggered_tp.empty:
+            align = 0.5
+        else:
+            align = 0.525
+        fig.legend(handles, labels, bbox_to_anchor=(align, 0), ncol = 2)
         fig.tight_layout()
 
         name = f"event_display_run_{self.info.run_number.values[0]}_trigger_{self.info.index[0]}.png"
@@ -99,17 +185,17 @@ def GetHDFHeirarchy(keys):
     return sorted_keys
 
 
-def UnpackRecords(hdf : pd.HDFStore, n : int):
+def UnpackRecords(hdf : pd.HDFStore, n : list):
     keys = GetHDFHeirarchy(hdf.keys()) # I asusme that keys[0] is the trigger record andkeys[1] is the dataframes
 
-    if n >= len(keys[0]):
+    if max(n) > len(keys[0]):
         raise Exception(f"number of records specified to open is greater than the number of records: {len(keys[0])}")
 
     if n == -1:
-        n = len(keys[0])
+        n = range(len(keys[0]))
 
     records = {}
-    for i in range(n):
+    for i in n:
         record = keys[0][i]
         print(f"opening record {record}")
         r = Record()
@@ -140,17 +226,79 @@ def CategoriseTriggers(records : dict):
     return fake_triggers, real_triggers
 
 
+def RegionFinder(tps, time_tolerence = 500, channel_tolerence = 10000, counts_threshold = 1, unique_channel_tolerence = 20) -> list[Region]:
+    df = tps.sort_values(by = ["peak_time"])
+
+    # time_tolerence = 23 # how many gaps in time do we tolerate before deeming the end of an object
+    # channel_tolerence = 0 # how many gaps in channel do we tolerate before deeming the end of and object
+
+    regions = []
+    start_channel = None
+    max_channel = None
+    min_channel = None
+
+    unique_channels = []
+
+    start_time = None
+    nTPs = 1
+
+    for i in range(1, len(df)):
+        
+        if start_channel is None: start_channel = df.iloc[i - 1].offline_ch
+        if start_time is None: start_time = df.iloc[i - 1].peak_time
+
+        if max_channel is None or max_channel < df.iloc[i - 1].offline_ch:
+            max_channel = df.iloc[i - 1].offline_ch
+
+        if min_channel is None or min_channel > df.iloc[i - 1].offline_ch:
+            min_channel = df.iloc[i - 1].offline_ch
+
+        if len(unique_channels) == 0 or df.iloc[i - 1].offline_ch not in unique_channels:
+            unique_channels.append(df.iloc[i - 1].offline_ch)
+
+        # t = (df.iloc[i].peak_time - df.iloc[i - 1].peak_time) // 32
+        # c = abs(df.iloc[i].offline_ch - df.iloc[i - 1].offline_ch)
+        t = (df.iloc[i].peak_time - start_time) // 32
+        c = abs(df.iloc[i].offline_ch - min_channel)
+
+        nTPs += 1
+
+        out_of_time = t > time_tolerence
+        out_of_space = c > channel_tolerence
+        above_threshold = nTPs > counts_threshold
+
+        if (out_of_time or out_of_space) or i == len(df)-1:
+            if above_threshold: # only create a region if there enough TPs in the region
+                if len(unique_channels) > unique_channel_tolerence: # only create a region if there are enough unique channels (avoid noisy channels)
+                    regions.append(Region(start_time, df.iloc[i].peak_time, min_channel, max_channel, nTPs))
+            start_channel = None
+            max_channel = None
+            start_time = None
+            unique_channels = []
+            nTPs = 1
+
+    print(f"number of TPs: {len(tps)}")
+    print(f"number of regions: {len(regions)}")
+    
+    total = 0
+    for r in regions:
+        print(r)
+        total += r.n_TP
+    print(f"{total=}")
+    return regions
+
+
 def ChannelTimeToPlotSpace(time, channel, heatmap_data, start_time):
     FIR_offest = 16 * 32 # FIR shifts waveform by 16 ticks in firmware then multiply by 32 to scale to WIB frame time ticks
     x = len(heatmap_data.index) * (time - start_time - FIR_offest) / max(heatmap_data.index)
-    y = max(heatmap_data.columns) - channel     
+
+    y = list(map(lambda x : np.array(np.where(heatmap_data.columns.values == x)).flatten(), channel)) # maps channels to plot accounting for gaps in the channel numbers
     return x, y
 
 
 def main(args):
     with pd.HDFStore(args.file) as hdf:
         records = UnpackRecords(hdf, args.n_records)
-        print(records["record_0"])
         fake_triggers, real_triggers = CategoriseTriggers(records)
         
         if len(fake_triggers) > 0:
@@ -164,7 +312,17 @@ def main(args):
             os.makedirs(path_r, exist_ok = True)
             for t in real_triggers:
                 records[t].EventDisplay(path_r)
+                # RegionFinder(records[t].tps)
 
+
+def parse_string(string : str):
+    n = [] 
+    for s in string.replace(" ", "").split(","):
+        r = list(map(int, s.split(":")))
+        if len(r) > 1:
+            r = range(r[0], r[1] + 1)
+        n.extend(r)
+    return n
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description = "Run shower merging analysis in batches", formatter_class = argparse.RawDescriptionHelpFormatter)
@@ -176,7 +334,8 @@ if __name__ == "__main__":
         "PD2HDChannelMap",
         "VSTChannelMap"
     ], help = "channel map to use.", required = True)
-    parser.add_argument("-n", "--number_of_records", dest = "n_records", type = int, help = "number of trigger records to open", required = True)
+    parser.add_argument("-n", "--number_of_records", dest = "n_records", type = str, help = "number of trigger records to open, -1 opens all", required = True)
     args = parser.parse_args()
+    args.n_records = int(args.n_records) if args.n_records == "-1" else parse_string(args.n_records)
     print(vars(args))
     main(args)
