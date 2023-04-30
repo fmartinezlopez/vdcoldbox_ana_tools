@@ -9,8 +9,6 @@ import argparse
 import configparser
 import os
 
-from dataclasses import dataclass
-
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -24,22 +22,6 @@ from rich import print
 import detchannelmaps
 
 import TPGAlgorithm
-
-@dataclass
-class Region():
-    start_time    : int
-    end_time      : int
-    start_channel : int
-    end_channel   : int
-    n_TP          : int
-
-    @property
-    def time_range(self):
-        return self.end_time - self.start_time
-    
-    @property
-    def channel_range(self):
-        return self.end_channel - self.start_channel
 
 
 class Record:
@@ -161,31 +143,6 @@ class Record:
                         if not (min(y_range) <= int(j) <= max(y_range)):
                             raise Exception(f"channel {y_labels[i]} plot range must be within {[min(adc_df.columns), max(adc_df.columns)]}.")
                     axes[-(i+1)].set_ylim(y[0], y[1])
-
-        # trigger 1 run 19562
-        # ranges = (
-        #     [(850, 1050), (150, 0)], # Y
-        #     [(850, 1050), (275, 175)], # V
-        #     [(850, 1050), (192, 70)], # U
-        # )
-
-        # trigger 121 run 20676
-        # ranges = (
-        #     [(850, 1050), (170, 20)], # Y
-        #     [(850, 1050), (100, 0)], # V
-        #     [(850, 1050), (100, 0)], # U
-        # )
-
-        # # trigger 123 run 20676
-        # ranges = (
-        #     [(900, 1250), (150, 0)], # Y
-        #     [(900, 1250), (110, 30)], # V
-        #     [(900, 1250), (150, 50)], # U
-        # )
-
-        # for ax, r in zip(axes, ranges):
-        #     ax.set_xlim(r[0])
-        #     ax.set_ylim(r[1])
 
         if TIME_UNIT[0] == "ticks":
             axes[2].set_xlabel(f"relative timestamp (ticks)")
