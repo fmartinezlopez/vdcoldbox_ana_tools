@@ -59,4 +59,5 @@ export DF_ROOT="$INSTALL_LOC"
 
 export PYTHONPATH="$PYTHONPATH:$DF_ROOT/src"
 export PATH="$PATH:$DF_ROOT/bin"
+export PATH=$PYTHONPATH:$DF_ROOT/scripts:$PATH
 
