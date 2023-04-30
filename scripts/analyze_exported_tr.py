@@ -6,6 +6,7 @@ Author: Shyam Bhuller
 Description: Analyses exported TRs.
 """
 import argparse
+import configparser
 import os
 
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from matplotlib.colors import LogNorm
 from rich import print
 
 import detchannelmaps
+
+import TPGAlgorithm
 
 @dataclass
 class Region():
@@ -45,20 +48,40 @@ class Record:
         self.raw_adcs = raw_adcs
         self.fwtps = fwtps
         self.tps = tps
+        self.sim_tps = None
+
+
+    def SimulateTPs(self, hit_threshold : int = 20):
+        tps = TPGAlgorithm.run(np.array(self.raw_adcs.values, dtype = int), hit_threshold)
+
+        tps.offline_ch = self.raw_adcs.columns[tps.offline_ch.values] # replace arbitrary channel numbers with provided ones
+
+        # convert times from arbitrary numbers to the timestamps starting from the first.
+        start_time = self.raw_adcs.index[0]
+        time_diff = self.raw_adcs.index[1] - self.raw_adcs.index[0]
+
+        tps.start_time = (tps.start_time.values * time_diff) + start_time
+        tps.peak_time = (tps.peak_time.values * time_diff) + start_time
+        self.sim_tps = tps
 
 
     def AddPlaneID(self, channel_map : str):
         cmap = detchannelmaps.make_map(channel_map)
-        self.raw_adcs.columns = pd.MultiIndex.from_tuples([(c, cmap.get_plane_from_offline_channel(c)) for c in self.raw_adcs.columns], names = ["offline_channel", "planeID"])
+        if self.raw_adcs is not None: self.raw_adcs.columns = pd.MultiIndex.from_tuples([(c, cmap.get_plane_from_offline_channel(c)) for c in self.raw_adcs.columns], names = ["offline_channel", "planeID"])
         if self.tps is not None: self.tps = pd.concat([self.tps, pd.DataFrame({"planeID" : [cmap.get_plane_from_offline_channel(c) for c in self.tps.offline_ch.values]})], axis = 1)
+        if self.sim_tps is not None: self.sim_tps = pd.concat([self.sim_tps, pd.DataFrame({"planeID" : [cmap.get_plane_from_offline_channel(c) for c in self.sim_tps.offline_ch.values]})], axis = 1)
 
 
     def FindTriggeredTPs(self):
         return self.tps[self.tps.start_time.isin(self.info.trigger_timestamp)]
 
 
-    def EventDisplay(self, path : str = "", find_regions : bool = False, plot_triggered_tp : bool = False):
+    def EventDisplay(self, path : str = "", plot_triggered_tp : bool = True, simulate_tps : bool = False, hit_threshold : int = 20, config : dict = None):
         fig, axes = plt.subplots(nrows = 3, ncols = 1, figsize=(6.4*2, 4.8*2), sharex = True)
+        
+        if simulate_tps and self.sim_tps == None:
+            self.SimulateTPs(hit_threshold)
+
         self.AddPlaneID(args.channel_map) # so we can filter by plane ID when making plots #? perhaps this should be done at __init__ or something
 
         if plot_triggered_tp and self.tps is not None:
@@ -67,8 +90,6 @@ class Record:
             triggered_tp = pd.DataFrame()
 
         y_labels = ["U", "V", "Y"]
-        xlim = None
-        ylim = None
         for i in range(3):
             adc_df = self.raw_adcs.iloc[:, self.raw_adcs.columns.get_level_values("planeID") == i]
             adc_df.columns = adc_df.columns.get_level_values("offline_channel").values
@@ -77,7 +98,10 @@ class Record:
             adc_df = adc_df.set_index(adc_df.index - start_time)
             adc_df = adc_df - adc_df.median(0) # approximate pedestal subtraction
             adc_df = adc_df[adc_df.columns[::-1]] # reverse column order so channels in ascending order in the y axis after transposing
+
             rms = np.mean(np.sqrt(np.mean(adc_df**2, axis = 0)))
+            print(rms)
+
             sns.heatmap(adc_df.T, ax = axes[-(i + 1)], cmap = "RdGy_r", vmin = -5 * rms, vmax = 5 * rms)
 
 
@@ -92,7 +116,7 @@ class Record:
                 if len(y) != len(x):
                     print(f"record {self.info.index} tp conversion didn't work properly")
                 else:
-                    axes[-(i + 1)].scatter(x, y, color = "dodgerblue", s = 1, label = "TP")
+                    axes[-(i + 1)].scatter(x, y, color = "dodgerblue", s = 50, label = "TP")
 
                 if not triggered_tp.empty:
                     if not triggered_tps_in_plane.empty:
@@ -101,19 +125,42 @@ class Record:
                             print(f"record {self.info.index} tp conversion didn't work properly")
                         else:
                             axes[-(i + 1)].scatter(x, y, color = "lime", s = 150, marker = "x", label = "triggered TP")
-                        xlim = [x.iloc[0] - 100, x.iloc[0] + 100]
-                        ylim = [y[0] + 50, y[0] - 50]
+            if simulate_tps:
+                tp_df = self.sim_tps[self.sim_tps.planeID == i]
+                x, y = ChannelTimeToPlotSpace(tp_df.peak_time, tp_df.offline_ch, adc_df, start_time)
+                if len(y) != len(x):
+                    print(f"record {self.info.index} tp conversion didn't work properly")
+                else:
+                    axes[-(i + 1)].scatter(x, y, facecolors = "none", edgecolors = "darkviolet", s = 50, label = " simulated TP", marker = "s")
 
-
-                if find_regions:
-                    regions = RegionFinder(tp_df)
-                    for r in regions:
-                        x, y = ChannelTimeToPlotSpace([r.start_time, r.end_time], [r.start_channel, r.end_channel], adc_df, start_time)
-                        rect = patches.Rectangle((x[0], y[0]), x[1] - x[0], y[1] - y[0], linewidth = 1, edgecolor = 'r', facecolor = "none")
-                        axes[-(i + 1)].add_patch(rect)
+            x_range = axes[-(i + 1)].get_xlim()
+            y_range = axes[-(i + 1)].get_ylim()
+            print(f"{x_range}")
+            print(f"{y_range}")
 
             axes[-(i + 1)].set_xlabel("")
             axes[-(i + 1)].set_ylabel(y_labels[i])
+            if config:
+                if "range" in config["Time"]:
+                    const = len(adc_df.index) / (max(adc_df.index) * TIME_UNIT[1])
+                    print(f"{const=}")
+                    print(f"{max(adc_df.index)=}")
+                    print(f"{len(adc_df.index)=}")
+                    x = [min(config["Time"]["range"]), max(config["Time"]["range"])]
+                    x = [j * const for j in x]
+                    print(x)
+                    for j in x:
+                        if not (min(x_range) <= int(j) <= max(x_range)):
+                            raise Exception(f"time plot range must be within {[min(x_range) / const, max(x_range) / const]} {TIME_UNIT[0]}.")
+
+                    axes[-(i+1)].set_xlim(x)
+                if "range" in config[y_labels[i]]:
+                    y = [max(config[y_labels[i]]["range"]), min(config[y_labels[i]]["range"])]
+                    y = [max(adc_df.columns) - j for j in y]
+                    for j in y:
+                        if not (min(y_range) <= int(j) <= max(y_range)):
+                            raise Exception(f"channel {y_labels[i]} plot range must be within {[min(adc_df.columns), max(adc_df.columns)]}.")
+                    axes[-(i+1)].set_ylim(y[0], y[1])
 
         # trigger 1 run 19562
         # ranges = (
@@ -140,14 +187,16 @@ class Record:
         #     ax.set_xlim(r[0])
         #     ax.set_ylim(r[1])
 
-        # axes[2].set_xlabel(f"relative timestamp (ticks)")
-        labels = axes[2].get_xticklabels()        
-        # print(labels)
-        for label in labels:
-            label._text = str(int(label._text) * 16/1000)
-        # print(labels)
-        axes[2].set_xticklabels(labels, rotation = 90)
-        axes[2].set_xlabel(f"relative time ($\mu$s)")
+        if TIME_UNIT[0] == "ticks":
+            axes[2].set_xlabel(f"relative timestamp (ticks)")
+        else:
+            labels = axes[2].get_xticklabels()
+            for label in labels:
+                print(int(label._text))
+                label._text = str(int(label._text) * TIME_UNIT[1])
+            axes[2].set_xticklabels(labels, rotation = 90)
+            time_label = "$\mu$s" if TIME_UNIT[0] == "us" else TIME_UNIT[0]
+            axes[2].set_xlabel(f"relative time ({time_label})")
 
         fig.suptitle(f"run: {self.info.run_number.values[0]}, start timestamp : {start_time}")
 
@@ -194,7 +243,6 @@ def GetHDFHeirarchy(keys):
     for i in range(len(sorted_keys[0])):
         records.append([int(sorted_keys[0][i].split("_")[-1]), sorted_keys[0][i]])
     sorted_keys[0] = np.array(records, dtype = object)
-    print(sorted_keys)
     return sorted_keys
 
 
@@ -207,19 +255,26 @@ def UnpackRecords(hdf : pd.HDFStore, n : list):
     records = {}
     for i in n:
         if i not in keys[0][:, 0]:
-            raise Exception(f"record number {i} not in list of records")
+            raise Exception(f"record number {i} not in list of records: \n{keys[0][:, 0]}")
         record = keys[0][keys[0][:, 0] == i][0]
         print(f"opening record {record}")
         r = Record()
-        is_empty = False
+        is_empty = []
         for df in keys[1]:
             data = hdf.get("/"+record[1]+"/"+df)
             if data.empty:
-                is_empty = True
-                break
+                is_empty.append(df)
+                continue
             setattr(r, df, data)
-        if is_empty: continue
+        if len(is_empty) > 0:
+            print(f"missing data in record: {is_empty}")
+        if "raw_adcs" in is_empty and "tps" in is_empty:
+            print(f"{record[1]} has no data! skipping.")
+            continue
+        else:
+            pass # we have all the data in the record
         records[record[1]] = r
+
     return records
 
 
@@ -249,70 +304,8 @@ def CategoriseTriggers(records : dict):
     return fake_triggers, real_triggers
 
 
-def RegionFinder(tps, time_tolerence = 500, channel_tolerence = 10000, counts_threshold = 1, unique_channel_tolerence = 20) -> list[Region]:
-    df = tps.sort_values(by = ["peak_time"])
-
-    # time_tolerence = 23 # how many gaps in time do we tolerate before deeming the end of an object
-    # channel_tolerence = 0 # how many gaps in channel do we tolerate before deeming the end of and object
-
-    regions = []
-    start_channel = None
-    max_channel = None
-    min_channel = None
-
-    unique_channels = []
-
-    start_time = None
-    nTPs = 1
-
-    for i in range(1, len(df)):
-        
-        if start_channel is None: start_channel = df.iloc[i - 1].offline_ch
-        if start_time is None: start_time = df.iloc[i - 1].peak_time
-
-        if max_channel is None or max_channel < df.iloc[i - 1].offline_ch:
-            max_channel = df.iloc[i - 1].offline_ch
-
-        if min_channel is None or min_channel > df.iloc[i - 1].offline_ch:
-            min_channel = df.iloc[i - 1].offline_ch
-
-        if len(unique_channels) == 0 or df.iloc[i - 1].offline_ch not in unique_channels:
-            unique_channels.append(df.iloc[i - 1].offline_ch)
-
-        # t = (df.iloc[i].peak_time - df.iloc[i - 1].peak_time) // 32
-        # c = abs(df.iloc[i].offline_ch - df.iloc[i - 1].offline_ch)
-        t = (df.iloc[i].peak_time - start_time) // 32
-        c = abs(df.iloc[i].offline_ch - min_channel)
-
-        nTPs += 1
-
-        out_of_time = t > time_tolerence
-        out_of_space = c > channel_tolerence
-        above_threshold = nTPs > counts_threshold
-
-        if (out_of_time or out_of_space) or i == len(df)-1:
-            if above_threshold: # only create a region if there enough TPs in the region
-                if len(unique_channels) > unique_channel_tolerence: # only create a region if there are enough unique channels (avoid noisy channels)
-                    regions.append(Region(start_time, df.iloc[i].peak_time, min_channel, max_channel, nTPs))
-            start_channel = None
-            max_channel = None
-            start_time = None
-            unique_channels = []
-            nTPs = 1
-
-    print(f"number of TPs: {len(tps)}")
-    print(f"number of regions: {len(regions)}")
-    
-    total = 0
-    for r in regions:
-        print(r)
-        total += r.n_TP
-    print(f"{total=}")
-    return regions
-
-
 def ChannelTimeToPlotSpace(time, channel, heatmap_data, start_time):
-    FIR_offest = 16 * 32 # FIR shifts waveform by 16 ticks in firmware then multiply by 32 to scale to WIB frame time ticks
+    FIR_offest = 15 * 25 # FIR shifts waveform by 16 ticks in firmware then multiply by 32 to scale to WIB frame time ticks
     x = len(heatmap_data.index) * (time - start_time - FIR_offest) / max(heatmap_data.index)
     y = list(map(lambda x : list(np.array(np.where(heatmap_data.columns.values == x)).flatten()), channel)) # maps channels to plot accounting for gaps in the channel numbers
 
@@ -321,6 +314,47 @@ def ChannelTimeToPlotSpace(time, channel, heatmap_data, start_time):
         y_flattened.extend(i)
 
     return x, y_flattened
+
+
+def ChannelRMS(record : Record, path : str = ""):
+    y_labels = ["U", "V", "Y"]
+
+    sns.set_theme()
+    noisy_channels = None
+    fig, axes = plt.subplots(nrows = 1, ncols = 1, figsize=(6.4*2, 4.8*1), sharex = True)
+    for i in range(3):
+        adc_df = record.raw_adcs.iloc[:, record.raw_adcs.columns.get_level_values("planeID") == i]
+        adc_df = adc_df - adc_df.median(0) # approximate pedestal subtraction
+        adc_df.columns = adc_df.columns.get_level_values("offline_channel").values
+
+        rms = np.sqrt(np.mean(adc_df**2, axis = 0))
+        mean_rms = np.mean(np.sqrt(np.mean(adc_df**2, axis = 0)))
+
+        sns.lineplot(x = adc_df.columns, y = rms, ax = axes, label = y_labels[i])
+        axes.set_xlabel("channel")
+        axes.set_ylabel("rms")
+
+        # print(rms.to_string())
+
+        if noisy_channels is None:
+            noisy_channels = rms[rms > 10]
+        else:
+            noisy_channels = noisy_channels.append(rms[rms > 10])
+    
+    sns.scatterplot(x = noisy_channels.index, y = noisy_channels, color = "red", label = "rms > 10")
+    axes.set_ylim(0)
+
+    masks = [record.raw_adcs.columns.get_level_values("planeID") == i for i in range(3)]
+    mask = masks[0] | masks[1] | masks[2]
+
+    channels = record.raw_adcs.columns.get_level_values("offline_channel").values[mask]
+
+    axes.set_xlim(min(channels), max(channels))    
+    name = f"run_{record.info.run_number.values[0]}_trigger_{record.info.index[0]}"
+
+    fig.savefig(path + f"rms_" + name + ".png", dpi = 300, bbox_inches = "tight")
+    noisy_channels.to_latex(path + f"noisy_channels_" + name + ".tex")
+    return
 
 
 def main(args):
@@ -332,14 +366,15 @@ def main(args):
             path_f = f"run_{records[fake_triggers[0]].info.run_number.values[0]}/fake_triggers/"
             os.makedirs(path_f, exist_ok = True)
             for t in fake_triggers:
-                records[t].EventDisplay(path_f)
+                records[t].EventDisplay(path_f, simulate_tps = args.simulate_tps, hit_threshold = args.hit_threshold, config = args.plot_config)
+                ChannelRMS(records[t], path_f)
 
         if len(real_triggers) > 0:
             path_r = f"run_{records[real_triggers[0]].info.run_number.values[0]}/real_triggers/"
             os.makedirs(path_r, exist_ok = True)
             for t in real_triggers:
-                records[t].EventDisplay(path_r)
-                # RegionFinder(records[t].tps)
+                records[t].EventDisplay(path_r, simulate_tps = args.simulate_tps, hit_threshold = args.hit_threshold, config = args.plot_config)
+                ChannelRMS(records[t], path_r)
 
 
 def parse_string(string : str):
@@ -351,9 +386,27 @@ def parse_string(string : str):
         n.extend(r)
     return n
 
+
+def str_to_list(x):
+    l = x.split("[")[-1].split("]")[0].split(",")
+    return [float(v) for v in l]
+
+
+def ParsePlotConfig(config : str):
+    parser = configparser.ConfigParser()
+    parser.read(config)
+    parser = parser._sections
+    for c in parser:
+        for s in parser[c]:
+            parser[c][s] = str_to_list(parser[c][s])
+    print(parser)
+    return parser
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description = "Run shower merging analysis in batches", formatter_class = argparse.RawDescriptionHelpFormatter)
     parser.add_argument(dest = "file", type = str, help = "Exported dataframe to analyse")
+    parser.add_argument("-w", "--wib_frame", dest = "wib_frame", type = str, choices = ["ProtoDUNE", "DUNE"], help = "wib frame type at the time of data taking.", required = True)
     parser.add_argument("-c", "--channel_map", dest = "channel_map", type = str, choices = [
         "VDColdboxChannelMap",
         "HDColdboxChannelMap",
@@ -362,7 +415,29 @@ if __name__ == "__main__":
         "VSTChannelMap"
     ], help = "channel map to use.", required = True)
     parser.add_argument("-n", "--number_of_records", dest = "n_records", type = str, help = "trigger records to open, -1 opens all", required = True)
+    parser.add_argument("-s", "--simulate-tps", dest = "simulate_tps", action = "store_true", help = "simulate TPG based on ADC data.")
+    parser.add_argument("-T", "--hit-threshold", dest = "hit_threshold", type = int, default = 20, help = "simulate TPG based on ADC data.")
+    parser.add_argument("-C", "--config", dest = "plot_config", type = str, help = "configuration for event displays.")
+    parser.add_argument("-t", "--time-units", dest = "time_units", type = str, choices = ["ticks", "ns", "us", "ms", "s"], default = "us", help = "unit of time used for plots (plot configuration should be adjusted accordingly)")
+
     args = parser.parse_args()
     args.n_records = int(args.n_records) if args.n_records == "-1" else parse_string(args.n_records)
+
+    if args.wib_frame == "ProtoDUNE":
+        CLOCK_TICK_NS = 20 # ns
+    if args.wib_frame == "DUNE":
+        CLOCK_TICK_NS = 16 # ns
+
+    TIME_UNITS = {
+        "ticks" : 1,
+        "ns" : CLOCK_TICK_NS,
+        "us" : CLOCK_TICK_NS / 1E3,
+        "ms" : CLOCK_TICK_NS / 1E6,
+        "s" : CLOCK_TICK_NS  / 1E9,
+    }
+    TIME_UNIT = (args.time_units, TIME_UNITS[args.time_units])
+    if args.plot_config:
+        args.plot_config = ParsePlotConfig(args.plot_config)
+
     print(vars(args))
     main(args)
